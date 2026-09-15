@@ -8,11 +8,15 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+
 @Service
 @RequiredArgsConstructor
 public class AuthService {
     private final SysUserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
+    private final PermissionCacheService permissionCacheService;
+    private final DataScopeService dataScopeService;
 
     public LoginResult login(String username, String password) {
         SysUser user = userMapper.selectOne(Wrappers.<SysUser>lambdaQuery().eq(SysUser::getUsername, username));
@@ -31,13 +35,15 @@ public class AuthService {
         if (user == null) {
             throw new BusinessException("USER_NOT_FOUND", "Current user no longer exists");
         }
-        return new CurrentUser(user.getId(), user.getUsername(), user.getDisplayName());
+        DataScope scope = dataScopeService.forUser(userId);
+        return new CurrentUser(user.getId(), user.getUsername(), user.getDisplayName(),
+                permissionCacheService.permissions(userId), scope.allProjects(), scope.projectIds());
     }
 
     public record LoginResult(String tokenName, String tokenValue, Long userId, String username, String displayName) {
     }
 
-    public record CurrentUser(Long userId, String username, String displayName) {
+    public record CurrentUser(Long userId, String username, String displayName, List<String> permissions,
+                              boolean allProjects, List<Long> projectIds) {
     }
 }
-

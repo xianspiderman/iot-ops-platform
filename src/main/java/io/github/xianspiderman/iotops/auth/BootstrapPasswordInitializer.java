@@ -20,6 +20,10 @@ public class BootstrapPasswordInitializer implements ApplicationRunner {
             user.setPasswordHash(passwordEncoder.encode("Admin@123"));
             userMapper.updateById(user);
         }
+        SysUser operator = userMapper.selectOne(Wrappers.<SysUser>lambdaQuery().eq(SysUser::getUsername, "operator"));
+        if (operator != null && "{BOOTSTRAP_OPERATOR}".equals(operator.getPasswordHash())) {
+            operator.setPasswordHash(passwordEncoder.encode("Operator@123"));
+            userMapper.updateById(operator);
+        }
     }
 }
-

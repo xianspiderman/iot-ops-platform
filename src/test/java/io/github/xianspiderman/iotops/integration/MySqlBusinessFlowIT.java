@@ -1,11 +1,16 @@
 package io.github.xianspiderman.iotops.integration;
 
 import com.alibaba.excel.EasyExcel;
+import cn.dev33.satoken.stp.StpUtil;
 import io.github.xianspiderman.iotops.alarm.AlarmEventProcessor;
 import io.github.xianspiderman.iotops.alarm.AlarmProcessOutcome;
+import io.github.xianspiderman.iotops.auth.DataScopeService;
+import io.github.xianspiderman.iotops.auth.PermissionCacheService;
+import io.github.xianspiderman.iotops.auth.RbacService;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
 import io.github.xianspiderman.iotops.device.Device;
+import io.github.xianspiderman.iotops.device.DeviceService;
 import io.github.xianspiderman.iotops.device.importer.DeviceImportError;
 import io.github.xianspiderman.iotops.device.importer.DeviceImportRow;
 import io.github.xianspiderman.iotops.device.importer.DeviceImportService;
@@ -24,12 +29,15 @@ import io.github.xianspiderman.iotops.timeout.TimeoutJobExecution;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -50,6 +58,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
         "spring.data.redis.repositories.enabled=false",
+        "spring.data.redis.client-type=jedis",
         "iot-ops.import.insert-batch-size=2"
 })
 class MySqlBusinessFlowIT {
@@ -60,11 +69,17 @@ class MySqlBusinessFlowIT {
             .withPassword("iot_ops_test")
             .withCommand("--log-bin-trust-function-creators=1");
 
+    @Container
+    static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:8.2.1-alpine"))
+            .withExposedPorts(6379);
+
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
+        registry.add("spring.data.redis.host", () -> "127.0.0.1");
+        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
     }
 
     @Autowired
@@ -83,14 +98,28 @@ class MySqlBusinessFlowIT {
     private TimeoutInspectionService timeoutInspectionService;
     @Autowired
     private TimeoutFailureMapper timeoutFailureMapper;
+    @Autowired
+    private PermissionCacheService permissionCacheService;
+    @Autowired
+    private RbacService rbacService;
+    @Autowired
+    private DataScopeService dataScopeService;
+    @Autowired
+    private DeviceService deviceService;
 
     @BeforeEach
     void cleanBusinessRows() {
+        try {
+            REDIS.execInContainer("redis-cli", "FLUSHALL");
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
         jdbc.execute("DROP TRIGGER IF EXISTS reject_submit_track");
         jdbc.execute("DROP TRIGGER IF EXISTS reject_alarm_insert");
         jdbc.execute("DROP TRIGGER IF EXISTS reject_timeout_track");
         jdbc.update("DELETE FROM alarm_event_record");
         jdbc.update("DELETE FROM alarm");
+        jdbc.update("DELETE FROM business_audit_log");
         jdbc.update("DELETE FROM timeout_failure");
         jdbc.update("DELETE FROM timeout_job_execution");
         jdbc.update("DELETE FROM work_order_track");
@@ -99,6 +128,19 @@ class MySqlBusinessFlowIT {
         jdbc.update("DELETE FROM device_import_error");
         jdbc.update("DELETE FROM device_import_task");
         jdbc.update("DELETE FROM device WHERE id > 2");
+        jdbc.update("DELETE FROM project WHERE id > 1");
+        jdbc.update("DELETE FROM sys_role_permission WHERE role_id = 2");
+        jdbc.update("""
+                INSERT INTO sys_role_permission(role_id, permission_id)
+                SELECT 2, id FROM sys_permission
+                 WHERE permission_code IN ('project:read', 'product:read', 'device:read', 'device:write',
+                                           'device:import', 'work-order:read', 'work-order:write',
+                                           'alarm:read', 'timeout:read')
+                """);
+        jdbc.update("DELETE FROM sys_user_role WHERE user_id = 4");
+        jdbc.update("INSERT INTO sys_user_role(user_id, role_id) VALUES (4, 2)");
+        jdbc.update("DELETE FROM sys_user_data_scope WHERE user_id = 4");
+        jdbc.update("INSERT INTO sys_user_data_scope(user_id, scope_type, project_id) VALUES (4, 'PROJECT', 1)");
         jdbc.update("""
                 INSERT INTO sys_user(id, username, password_hash, display_name, status)
                 VALUES (2, 'operator-a', 'unused', 'Operator A', 'ENABLED'),
@@ -112,6 +154,8 @@ class MySqlBusinessFlowIT {
         jdbc.execute("DROP TRIGGER IF EXISTS reject_submit_track");
         jdbc.execute("DROP TRIGGER IF EXISTS reject_alarm_insert");
         jdbc.execute("DROP TRIGGER IF EXISTS reject_timeout_track");
+        StpUtil.logout(2L);
+        StpUtil.logout(4L);
     }
 
     @Test
@@ -402,6 +446,90 @@ class MySqlBusinessFlowIT {
         assertThat(timeoutFailureMapper.selectById(failure.getId()).getStatus()).isEqualTo("RESOLVED");
         assertThat(jdbc.queryForObject("SELECT timeout_flag FROM work_order WHERE id = ?", Boolean.class,
                 order.getId())).isTrue();
+    }
+
+    @Test
+    void permissionCacheHitsInvalidatesAndRoleChangeExpiresTheSession() {
+        PermissionCacheService.CacheStats before = permissionCacheService.snapshot();
+
+        assertThat(permissionCacheService.permissions(4L)).contains("device:read", "work-order:write");
+        assertThat(permissionCacheService.permissions(4L)).contains("device:read", "work-order:write");
+        PermissionCacheService.CacheStats warmed = permissionCacheService.snapshot();
+        assertThat(warmed.misses() - before.misses()).isEqualTo(1);
+        assertThat(warmed.hits() - before.hits()).isEqualTo(1);
+
+        String token = StpUtil.getStpLogic().createLoginSession(4L);
+        assertThat(StpUtil.getStpLogic().getLoginIdByToken(token)).hasToString("4");
+        rbacService.replaceRolePermissions(2L, List.of(5L), 1L);
+
+        assertThat(StpUtil.getStpLogic().getLoginIdByToken(token)).isNull();
+        assertThat(permissionCacheService.permissions(4L)).containsExactly("device:read");
+        assertThat(permissionCacheService.snapshot().invalidations() - warmed.invalidations()).isGreaterThanOrEqualTo(2);
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM business_audit_log WHERE action = 'ROLE_PERMISSIONS_REPLACE'", Integer.class))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void projectDataScopeFiltersDevicePagesAndRejectsOutOfScopeWrites() {
+        jdbc.update("""
+                INSERT INTO project(id, project_code, project_name, status)
+                VALUES (2, 'REMOTE-SITE', 'Remote Site', 'ENABLED')
+                """);
+        jdbc.update("""
+                INSERT INTO device(sn, device_name, project_id, product_id, online_status)
+                VALUES ('SCOPE-SN-001', 'Out of scope device', 2, 1, 'UNKNOWN')
+                """);
+
+        var scope = dataScopeService.forUser(4L);
+        assertThat(scope.allProjects()).isFalse();
+        assertThat(scope.projectIds()).containsExactly(1L);
+        assertThat(deviceService.page(1, 20, null, null, scope).records())
+                .extracting(Device::getProjectId).containsOnly(1L);
+        assertThat(deviceService.page(1, 20, null, 2L, scope).records()).isEmpty();
+        assertThatThrownBy(() -> dataScopeService.requireProject(4L, 2L))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("outside");
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "iot.benchmark", matches = "true")
+    void benchmarkImportLookupRoundTripsAgainstRowByRowCandidate() {
+        int rowCount = 1_000;
+        List<String> sns = java.util.stream.IntStream.range(0, rowCount)
+                .mapToObj(index -> "BENCH-SN-%04d".formatted(index))
+                .toList();
+        for (int index = 0; index < 20; index++) {
+            jdbc.queryForObject("SELECT COUNT(*) FROM device WHERE sn = ?", Integer.class, sns.get(index));
+        }
+
+        long naiveStart = System.nanoTime();
+        int naiveExisting = 0;
+        for (String sn : sns) {
+            jdbc.queryForObject("SELECT id FROM project WHERE project_code = 'SMART-CAMPUS'", Long.class);
+            jdbc.queryForObject("SELECT id FROM product WHERE product_code = 'ENV-SENSOR'", Long.class);
+            naiveExisting += jdbc.queryForObject("SELECT COUNT(*) FROM device WHERE sn = ?", Integer.class, sn);
+        }
+        long naiveMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - naiveStart);
+
+        long batchStart = System.nanoTime();
+        jdbc.queryForObject("SELECT id FROM project WHERE project_code = 'SMART-CAMPUS'", Long.class);
+        jdbc.queryForObject("SELECT id FROM product WHERE product_code = 'ENV-SENSOR'", Long.class);
+        int batchExisting = 0;
+        for (int start = 0; start < sns.size(); start += 500) {
+            List<String> batch = sns.subList(start, Math.min(start + 500, sns.size()));
+            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+            batchExisting += jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM device WHERE sn IN (" + placeholders + ")",
+                    Integer.class, batch.toArray());
+        }
+        long batchMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - batchStart);
+
+        System.out.printf("IMPORT_LOOKUP_BENCHMARK rows=%d naiveQueries=%d naiveMs=%d "
+                        + "batchQueries=%d batchMs=%d%n",
+                rowCount, rowCount * 3, naiveMillis, 4, batchMillis);
+        assertThat(batchExisting).isEqualTo(naiveExisting);
+        assertThat(batchMillis).isLessThan(naiveMillis);
     }
 
     private Callable<Boolean> acceptAttempt(Long orderId, Long userId, CountDownLatch ready, CountDownLatch go) {

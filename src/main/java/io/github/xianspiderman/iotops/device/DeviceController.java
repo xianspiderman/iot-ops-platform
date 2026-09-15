@@ -1,5 +1,8 @@
 package io.github.xianspiderman.iotops.device;
 
+import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.stp.StpUtil;
+import io.github.xianspiderman.iotops.auth.DataScopeService;
 import io.github.xianspiderman.iotops.common.ApiResponse;
 import io.github.xianspiderman.iotops.common.PageResult;
 import jakarta.validation.Valid;
@@ -20,17 +23,22 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class DeviceController {
     private final DeviceService service;
+    private final DataScopeService dataScopeService;
 
     @GetMapping
+    @SaCheckPermission("device:read")
     public ApiResponse<PageResult<Device>> page(@RequestParam(defaultValue = "1") long page,
                                                 @RequestParam(defaultValue = "20") long size,
                                                 @RequestParam(required = false) String keyword,
                                                 @RequestParam(required = false) Long projectId) {
-        return ApiResponse.ok(service.page(page, size, keyword, projectId));
+        return ApiResponse.ok(service.page(page, size, keyword, projectId,
+                dataScopeService.forUser(StpUtil.getLoginIdAsLong())));
     }
 
     @PostMapping
+    @SaCheckPermission("device:write")
     public ApiResponse<Device> create(@Valid @RequestBody DeviceRequest request) {
+        dataScopeService.requireProject(StpUtil.getLoginIdAsLong(), request.projectId());
         return ApiResponse.ok(service.create(new DeviceService.DeviceCommand(
                 request.sn(), request.deviceName(), request.projectId(), request.productId(),
                 request.imei(), request.mac(), request.firmwareVersion())));
@@ -46,4 +54,3 @@ public class DeviceController {
             @Size(max = 64) String firmwareVersion) {
     }
 }
-

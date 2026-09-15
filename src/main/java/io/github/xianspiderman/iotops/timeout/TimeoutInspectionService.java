@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.workorder.WorkOrder;
 import io.github.xianspiderman.iotops.workorder.WorkOrderMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +25,7 @@ public class TimeoutInspectionService {
     private final TimeoutJobExecutionMapper executionMapper;
     private final TimeoutFailureMapper failureMapper;
     private final Clock clock;
+    private final MeterRegistry meterRegistry;
 
     @Value("${iot-ops.timeout.batch-size:100}")
     private int batchSize;
@@ -68,6 +70,10 @@ public class TimeoutInspectionService {
         execution.setFailureCount(failed);
         execution.setFinishedAt(LocalDateTime.now(clock));
         executionMapper.updateById(execution);
+        meterRegistry.counter("iot.timeout.inspection", "status", execution.getStatus()).increment();
+        meterRegistry.counter("iot.timeout.items", "outcome", "marked").increment(success);
+        meterRegistry.counter("iot.timeout.items", "outcome", "skipped").increment(skipped);
+        meterRegistry.counter("iot.timeout.items", "outcome", "failed").increment(failed);
         log.info("timeout_inspection_completed executionKey={} scanned={} success={} skipped={} failed={}",
                 execution.getExecutionKey(), candidates.size(), success, skipped, failed);
         return execution;

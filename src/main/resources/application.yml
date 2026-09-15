@@ -74,6 +74,8 @@ logging:
     level: "%5p [requestId:%X{requestId:-}]"
 
 iot-ops:
+  permission-cache:
+    ttl: ${PERMISSION_CACHE_TTL:PT30M}
   import:
     max-rows: ${IMPORT_MAX_ROWS:10000}
     insert-batch-size: ${IMPORT_INSERT_BATCH_SIZE:200}
@@ -88,7 +90,7 @@ iot-ops:
 xxl:
   job:
     admin:
-      addresses: ${XXL_JOB_ADMIN_ADDRESSES:http://localhost:8088/xxl-job-admin}
+      addresses: ${XXL_JOB_ADMIN_ADDRESSES:http://localhost:8088}
     access-token: ${XXL_JOB_ACCESS_TOKEN:default_token}
     executor:
       app-name: ${XXL_JOB_EXECUTOR_APP_NAME:iot-ops-platform}

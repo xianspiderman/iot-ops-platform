@@ -3,9 +3,11 @@ import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, type ApiResponse } from '../api'
+import { useSessionStore } from '../stores/session'
 
 const router = useRouter()
 const loading = ref(false)
+const session = useSessionStore()
 const form = reactive({ username: 'admin', password: 'Admin@123' })
 
 async function submit() {
@@ -13,6 +15,7 @@ async function submit() {
   try {
     const response = await api.post<ApiResponse<{ tokenValue: string }>>('/auth/login', form)
     localStorage.setItem('iot-ops-token', response.data.data.tokenValue)
+    await session.load()
     await router.push('/')
   } catch (error: any) {
     ElMessage.error(error.response?.data?.message ?? 'Sign in failed')
@@ -40,4 +43,3 @@ async function submit() {
     </el-card>
   </main>
 </template>
-

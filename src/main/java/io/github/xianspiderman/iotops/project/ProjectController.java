@@ -1,5 +1,8 @@
 package io.github.xianspiderman.iotops.project;
 
+import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.stp.StpUtil;
+import io.github.xianspiderman.iotops.auth.DataScopeService;
 import io.github.xianspiderman.iotops.common.ApiResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -18,13 +21,16 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ProjectController {
     private final ProjectService service;
+    private final DataScopeService dataScopeService;
 
     @GetMapping
+    @SaCheckPermission("project:read")
     public ApiResponse<List<Project>> list() {
-        return ApiResponse.ok(service.list());
+        return ApiResponse.ok(service.list(dataScopeService.forUser(StpUtil.getLoginIdAsLong())));
     }
 
     @PostMapping
+    @SaCheckPermission("project:write")
     public ApiResponse<Project> create(@Valid @RequestBody ProjectRequest request) {
         return ApiResponse.ok(service.create(new ProjectService.ProjectCommand(
                 request.projectCode(), request.projectName(), request.description())));
@@ -35,4 +41,3 @@ public class ProjectController {
                                  @Size(max = 500) String description) {
     }
 }
-

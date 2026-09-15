@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.xianspiderman.iotops.auth.DataScope;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
 import io.github.xianspiderman.iotops.device.Device;
@@ -45,10 +46,15 @@ public class DeviceImportService {
     private final ObjectMapper objectMapper;
 
     public DeviceImportTask importWorkbook(String originalFileName, InputStream inputStream, Long operatorId) {
+        return importWorkbook(originalFileName, inputStream, operatorId, DataScope.all());
+    }
+
+    public DeviceImportTask importWorkbook(String originalFileName, InputStream inputStream, Long operatorId,
+                                           DataScope scope) {
         DeviceImportTask task = taskStateService.start(safeFileName(originalFileName), operatorId);
         try {
             List<ParsedDeviceImportRow> rows = excelReader.read(inputStream);
-            Classification classification = classify(rows);
+            Classification classification = classify(rows, scope);
             writeService.persist(task.getId(), rows.size(), classification.validDevices(), classification.errors());
             return taskMapper.selectById(task.getId());
         } catch (RuntimeException exception) {
@@ -65,9 +71,23 @@ public class DeviceImportService {
         return task;
     }
 
+    public DeviceImportTask getTask(Long taskId, Long userId, DataScope scope) {
+        DeviceImportTask task = getTask(taskId);
+        if (!scope.allProjects() && !userId.equals(task.getCreatedBy())) {
+            throw new BusinessException("DATA_SCOPE_DENIED", "Import task belongs to another user");
+        }
+        return task;
+    }
+
     public PageResult<DeviceImportTask> pageTasks(long page, long size) {
+        return pageTasks(page, size, null, DataScope.all());
+    }
+
+    public PageResult<DeviceImportTask> pageTasks(long page, long size, Long userId, DataScope scope) {
         return PageResult.from(taskMapper.selectPage(new Page<>(page, Math.min(size, 100)),
-                Wrappers.<DeviceImportTask>lambdaQuery().orderByDesc(DeviceImportTask::getId)));
+                Wrappers.<DeviceImportTask>lambdaQuery()
+                        .eq(!scope.allProjects(), DeviceImportTask::getCreatedBy, userId)
+                        .orderByDesc(DeviceImportTask::getId)));
     }
 
     public List<DeviceImportError> errors(Long taskId) {
@@ -77,7 +97,18 @@ public class DeviceImportService {
                 .orderByAsc(DeviceImportError::getRowNo));
     }
 
+    public List<DeviceImportError> errors(Long taskId, Long userId, DataScope scope) {
+        getTask(taskId, userId, scope);
+        return errorMapper.selectList(Wrappers.<DeviceImportError>lambdaQuery()
+                .eq(DeviceImportError::getTaskId, taskId)
+                .orderByAsc(DeviceImportError::getRowNo));
+    }
+
     Classification classify(List<ParsedDeviceImportRow> rows) {
+        return classify(rows, DataScope.all());
+    }
+
+    Classification classify(List<ParsedDeviceImportRow> rows, DataScope scope) {
         Set<String> projectCodes = new LinkedHashSet<>();
         Set<String> productCodes = new LinkedHashSet<>();
         Set<String> candidateSns = new LinkedHashSet<>();
@@ -122,6 +153,8 @@ public class DeviceImportService {
             require(messages, productCode, "Product code is required");
             if (projectCode != null && !projects.containsKey(projectCode)) {
                 messages.add("Project code does not exist");
+            } else if (projectCode != null && !scope.permits(projects.get(projectCode).getId())) {
+                messages.add("Project is outside your data scope");
             }
             if (productCode != null && !products.containsKey(productCode)) {
                 messages.add("Product code does not exist");

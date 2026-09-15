@@ -13,7 +13,7 @@
 
     <groupId>io.github.xianspiderman</groupId>
     <artifactId>iot-ops-platform</artifactId>
-    <version>0.3.0</version>
+    <version>1.0.0</version>
     <name>IoT Ops Platform</name>
     <description>IoT device delivery and operations management platform</description>
 
@@ -40,6 +40,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -126,6 +130,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

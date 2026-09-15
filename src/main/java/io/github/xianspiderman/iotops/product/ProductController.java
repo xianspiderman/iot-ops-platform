@@ -1,5 +1,6 @@
 package io.github.xianspiderman.iotops.product;
 
+import cn.dev33.satoken.annotation.SaCheckPermission;
 import io.github.xianspiderman.iotops.common.ApiResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -20,11 +21,13 @@ public class ProductController {
     private final ProductService service;
 
     @GetMapping
+    @SaCheckPermission("product:read")
     public ApiResponse<List<Product>> list() {
         return ApiResponse.ok(service.list());
     }
 
     @PostMapping
+    @SaCheckPermission("product:write")
     public ApiResponse<Product> create(@Valid @RequestBody ProductRequest request) {
         return ApiResponse.ok(service.create(new ProductService.ProductCommand(
                 request.productCode(), request.productName(), request.model(), request.communicationType())));
@@ -36,4 +39,3 @@ public class ProductController {
                                  @Size(max = 32) String communicationType) {
     }
 }
-

@@ -3,6 +3,7 @@ package io.github.xianspiderman.iotops.workorder;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import io.github.xianspiderman.iotops.auth.DataScope;
 import io.github.xianspiderman.iotops.auth.SysUser;
 import io.github.xianspiderman.iotops.auth.SysUserMapper;
 import io.github.xianspiderman.iotops.common.BusinessException;
@@ -35,9 +36,17 @@ public class WorkOrderService {
     private final Clock clock;
 
     public PageResult<WorkOrderView> page(long page, long size, String status) {
+        return page(page, size, status, DataScope.all());
+    }
+
+    public PageResult<WorkOrderView> page(long page, long size, String status, DataScope scope) {
+        if (!scope.allProjects() && scope.projectIds().isEmpty()) {
+            return new PageResult<>(page, Math.min(size, 100), 0, List.of());
+        }
         IPage<WorkOrder> result = workOrderMapper.selectPage(new Page<>(page, Math.min(size, 100)),
                 Wrappers.<WorkOrder>lambdaQuery()
                         .eq(status != null && !status.isBlank(), WorkOrder::getStatus, status)
+                        .in(!scope.allProjects(), WorkOrder::getProjectId, scope.projectIds())
                         .orderByDesc(WorkOrder::getId));
         List<Long> orderIds = result.getRecords().stream().map(WorkOrder::getId).toList();
         Map<Long, List<Long>> deviceIdsByOrder = orderIds.isEmpty()

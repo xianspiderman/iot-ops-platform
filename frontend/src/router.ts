@@ -8,8 +8,11 @@ const router = createRouter({
     { path: '/', component: () => import('./views/DashboardView.vue') },
     { path: '/devices', component: () => import('./views/DevicesView.vue') },
     { path: '/device-imports', component: () => import('./views/DeviceImportsView.vue') },
+    { path: '/taxonomy', component: () => import('./views/TaxonomyView.vue') },
     { path: '/work-orders', component: () => import('./views/WorkOrdersView.vue') },
     { path: '/reliability', component: () => import('./views/ReliabilityView.vue') },
+    { path: '/access', component: () => import('./views/AccessControlView.vue') },
+    { path: '/audit', component: () => import('./views/AuditLogsView.vue') },
   ],
 })
 

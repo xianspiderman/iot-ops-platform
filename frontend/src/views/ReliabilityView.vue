@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, type ApiResponse } from '../api'
+import { useSessionStore } from '../stores/session'
 
 interface PageResult<T> { total: number; records: T[] }
 interface Alarm { id: number; eventId: string; deviceId: number; eventType: string; severity: string; occurredAt: string; status: string }
@@ -17,18 +18,15 @@ const correctionVisible = ref(false)
 const correcting = ref<AlarmFailure>()
 const correctedPayload = ref('')
 const running = ref(false)
+const session = useSessionStore()
 
 async function load() {
-  const [alarmResult, alarmFailureResult, executionResult, timeoutFailureResult] = await Promise.all([
-    api.get<ApiResponse<PageResult<Alarm>>>('/alarms'),
-    api.get<ApiResponse<PageResult<AlarmFailure>>>('/alarm-events/failures'),
-    api.get<ApiResponse<PageResult<Execution>>>('/timeout-inspections/executions'),
-    api.get<ApiResponse<PageResult<TimeoutFailure>>>('/timeout-inspections/failures'),
-  ])
-  alarms.value = alarmResult.data.data.records
-  alarmFailures.value = alarmFailureResult.data.data.records
-  executions.value = executionResult.data.data.records
-  timeoutFailures.value = timeoutFailureResult.data.data.records
+  if (session.can('alarm:read')) alarms.value = (await api.get<ApiResponse<PageResult<Alarm>>>('/alarms')).data.data.records
+  if (session.can('alarm:recover')) alarmFailures.value = (await api.get<ApiResponse<PageResult<AlarmFailure>>>('/alarm-events/failures')).data.data.records
+  if (session.can('timeout:read')) {
+    executions.value = (await api.get<ApiResponse<PageResult<Execution>>>('/timeout-inspections/executions')).data.data.records
+    timeoutFailures.value = (await api.get<ApiResponse<PageResult<TimeoutFailure>>>('/timeout-inspections/failures')).data.data.records
+  }
 }
 
 async function runInspection() {
@@ -80,10 +78,10 @@ onMounted(load)
   <section>
     <div class="page-heading">
       <div><span class="eyebrow">FAILURE RECOVERY</span><h1>Reliability console</h1></div>
-      <el-button type="primary" :loading="running" @click="runInspection">Run timeout inspection</el-button>
+      <el-button v-if="session.can('timeout:execute')" type="primary" :loading="running" @click="runInspection">Run timeout inspection</el-button>
     </div>
     <el-tabs>
-      <el-tab-pane label="Alarms">
+      <el-tab-pane v-if="session.can('alarm:read')" label="Alarms">
         <el-table :data="alarms" class="data-table">
           <el-table-column prop="eventId" label="Event ID" min-width="190" />
           <el-table-column prop="deviceId" label="Device" width="90" />
@@ -93,7 +91,7 @@ onMounted(load)
           <el-table-column prop="status" label="Status" width="100" />
         </el-table>
       </el-tab-pane>
-      <el-tab-pane :label="`Bad messages (${alarmFailures.length})`">
+      <el-tab-pane v-if="session.can('alarm:recover')" :label="`Bad messages (${alarmFailures.length})`">
         <el-table :data="alarmFailures" class="data-table">
           <el-table-column prop="eventId" label="Event ID" min-width="180" />
           <el-table-column prop="processStatus" label="State" width="190" />
@@ -105,7 +103,7 @@ onMounted(load)
           </template></el-table-column>
         </el-table>
       </el-tab-pane>
-      <el-tab-pane label="Inspection runs">
+      <el-tab-pane v-if="session.can('timeout:read')" label="Inspection runs">
         <el-table :data="executions" class="data-table">
           <el-table-column prop="executionKey" label="Execution" min-width="260" />
           <el-table-column prop="triggerSource" label="Trigger" width="110" />
@@ -116,14 +114,14 @@ onMounted(load)
           <el-table-column prop="startedAt" label="Started" width="190" />
         </el-table>
       </el-tab-pane>
-      <el-tab-pane :label="`Inspection failures (${timeoutFailures.length})`">
+      <el-tab-pane v-if="session.can('timeout:read')" :label="`Inspection failures (${timeoutFailures.length})`">
         <el-table :data="timeoutFailures" class="data-table">
           <el-table-column prop="workOrderId" label="Work order" width="120" />
           <el-table-column prop="status" label="State" width="110" />
           <el-table-column prop="failureReason" label="Reason" min-width="300" />
           <el-table-column prop="attemptCount" label="Attempts" width="100" />
           <el-table-column label="Recovery" width="130"><template #default="scope">
-            <el-button v-if="scope.row.status === 'PENDING'" link type="primary" @click="compensate(scope.row.id)">Compensate</el-button>
+            <el-button v-if="scope.row.status === 'PENDING' && session.can('timeout:execute')" link type="primary" @click="compensate(scope.row.id)">Compensate</el-button>
           </template></el-table-column>
         </el-table>
       </el-tab-pane>

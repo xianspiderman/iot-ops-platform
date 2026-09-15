@@ -1,6 +1,7 @@
 package io.github.xianspiderman.iotops.project;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.github.xianspiderman.iotops.auth.DataScope;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -13,7 +14,16 @@ public class ProjectService {
     private final ProjectMapper mapper;
 
     public List<Project> list() {
-        return mapper.selectList(Wrappers.<Project>lambdaQuery().orderByAsc(Project::getProjectCode));
+        return list(DataScope.all());
+    }
+
+    public List<Project> list(DataScope scope) {
+        if (!scope.allProjects() && scope.projectIds().isEmpty()) {
+            return List.of();
+        }
+        return mapper.selectList(Wrappers.<Project>lambdaQuery()
+                .in(!scope.allProjects(), Project::getId, scope.projectIds())
+                .orderByAsc(Project::getProjectCode));
     }
 
     public Project create(ProjectCommand command) {
@@ -32,4 +42,3 @@ public class ProjectService {
     public record ProjectCommand(String projectCode, String projectName, String description) {
     }
 }
-

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.device.Device;
 import io.github.xianspiderman.iotops.device.DeviceMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -32,11 +33,13 @@ public class AlarmEventProcessor {
     private final AlarmTransactionService transactionService;
     private final AlarmRecordService recordService;
     private final Clock clock;
+    private final MeterRegistry meterRegistry;
 
     public AlarmProcessOutcome processRaw(String rawMessage) {
         ParsedMessage parsed = parse(rawMessage);
         if (parsed.error() != null) {
             recordService.recordBusinessFailure(parsed.eventId(), parsed.json(), parsed.error());
+            meterRegistry.counter("iot.alarm.process", "outcome", "business_bad_message").increment();
             log.warn("alarm_message_rejected eventId={} reason={}", parsed.eventId(), parsed.error());
             return AlarmProcessOutcome.BUSINESS_BAD_MESSAGE;
         }
@@ -85,6 +88,7 @@ public class AlarmEventProcessor {
         }
         if (validationError != null) {
             recordService.recordBusinessFailure(event.eventId(), json, validationError);
+            meterRegistry.counter("iot.alarm.process", "outcome", "business_bad_message").increment();
             if (manual) {
                 throw new BusinessException("ALARM_EVENT_STILL_INVALID", validationError);
             }
@@ -94,6 +98,7 @@ public class AlarmEventProcessor {
         AlarmEventRecord existing = findByEventId(event.eventId());
         if (existing != null && "PROCESSED".equals(existing.getProcessStatus())) {
             log.info("alarm_message_duplicate eventId={} alarmId={}", event.eventId(), existing.getAlarmId());
+            meterRegistry.counter("iot.alarm.process", "outcome", "duplicate").increment();
             return AlarmProcessOutcome.DUPLICATE;
         }
         if (!manual && existing != null && ("BUSINESS_BAD_MESSAGE".equals(existing.getProcessStatus())
@@ -103,6 +108,7 @@ public class AlarmEventProcessor {
 
         try {
             Alarm alarm = transactionService.process(event, json, existing);
+            meterRegistry.counter("iot.alarm.process", "outcome", "processed").increment();
             log.info("alarm_message_processed eventId={} alarmId={} deviceSn={}",
                     event.eventId(), alarm.getId(), event.deviceSn());
             return AlarmProcessOutcome.PROCESSED;
@@ -111,12 +117,15 @@ public class AlarmEventProcessor {
             if (concurrent != null && "PROCESSED".equals(concurrent.getProcessStatus())) {
                 log.info("alarm_message_concurrent_duplicate eventId={} alarmId={}",
                         event.eventId(), concurrent.getAlarmId());
+                meterRegistry.counter("iot.alarm.process", "outcome", "duplicate").increment();
                 return AlarmProcessOutcome.DUPLICATE;
             }
             recordService.recordSystemFailure(event.eventId(), json, rootMessage(exception));
+            meterRegistry.counter("iot.alarm.process", "outcome", "system_failure").increment();
             throw exception;
         } catch (RuntimeException exception) {
             recordService.recordSystemFailure(event.eventId(), json, rootMessage(exception));
+            meterRegistry.counter("iot.alarm.process", "outcome", "system_failure").increment();
             throw exception;
         }
     }

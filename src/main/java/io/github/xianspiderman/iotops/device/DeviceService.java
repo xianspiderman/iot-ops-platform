@@ -3,6 +3,7 @@ package io.github.xianspiderman.iotops.device;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import io.github.xianspiderman.iotops.auth.DataScope;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
 import io.github.xianspiderman.iotops.product.ProductMapper;
@@ -18,11 +19,22 @@ public class DeviceService {
     private final ProductMapper productMapper;
 
     public PageResult<Device> page(long page, long size, String keyword, Long projectId) {
+        return page(page, size, keyword, projectId, DataScope.all());
+    }
+
+    public PageResult<Device> page(long page, long size, String keyword, Long projectId, DataScope scope) {
+        if (!scope.allProjects() && scope.projectIds().isEmpty()) {
+            return new PageResult<>(page, Math.min(size, 100), 0, java.util.List.of());
+        }
+        if (projectId != null && !scope.permits(projectId)) {
+            return new PageResult<>(page, Math.min(size, 100), 0, java.util.List.of());
+        }
         IPage<Device> result = mapper.selectPage(new Page<>(page, Math.min(size, 100)),
                 Wrappers.<Device>lambdaQuery()
                         .and(keyword != null && !keyword.isBlank(), query -> query
                                 .like(Device::getSn, keyword).or().like(Device::getDeviceName, keyword))
                         .eq(projectId != null, Device::getProjectId, projectId)
+                        .in(!scope.allProjects() && projectId == null, Device::getProjectId, scope.projectIds())
                         .orderByDesc(Device::getId));
         return PageResult.from(result);
     }
@@ -54,4 +66,3 @@ public class DeviceService {
                                 String imei, String mac, String firmwareVersion) {
     }
 }
-

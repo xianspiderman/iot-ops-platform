@@ -1,6 +1,9 @@
 package io.github.xianspiderman.iotops.device.importer;
 
+import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.stp.StpUtil;
+import io.github.xianspiderman.iotops.auth.DataScope;
+import io.github.xianspiderman.iotops.auth.DataScopeService;
 import io.github.xianspiderman.iotops.common.ApiResponse;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
@@ -26,35 +29,46 @@ import java.util.List;
 @RequiredArgsConstructor
 public class DeviceImportController {
     private final DeviceImportService service;
+    private final DataScopeService dataScopeService;
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @SaCheckPermission("device:import")
     public ApiResponse<DeviceImportTask> upload(@RequestPart("file") MultipartFile file) throws IOException {
         if (file.isEmpty()) {
             throw new BusinessException("IMPORT_FILE_EMPTY", "Select a non-empty workbook");
         }
-        return ApiResponse.ok(service.importWorkbook(file.getOriginalFilename(), file.getInputStream(),
-                StpUtil.getLoginIdAsLong()));
+        Long userId = StpUtil.getLoginIdAsLong();
+        return ApiResponse.ok(service.importWorkbook(file.getOriginalFilename(), file.getInputStream(), userId,
+                dataScopeService.forUser(userId)));
     }
 
     @GetMapping
+    @SaCheckPermission("device:import")
     public ApiResponse<PageResult<DeviceImportTask>> tasks(@RequestParam(defaultValue = "1") long page,
                                                            @RequestParam(defaultValue = "20") long size) {
-        return ApiResponse.ok(service.pageTasks(page, size));
+        Long userId = StpUtil.getLoginIdAsLong();
+        return ApiResponse.ok(service.pageTasks(page, size, userId, dataScopeService.forUser(userId)));
     }
 
     @GetMapping("/{id}")
+    @SaCheckPermission("device:import")
     public ApiResponse<DeviceImportTask> task(@PathVariable Long id) {
-        return ApiResponse.ok(service.getTask(id));
+        Long userId = StpUtil.getLoginIdAsLong();
+        return ApiResponse.ok(service.getTask(id, userId, dataScopeService.forUser(userId)));
     }
 
     @GetMapping("/{id}/errors")
+    @SaCheckPermission("device:import")
     public ApiResponse<List<DeviceImportError>> errors(@PathVariable Long id) {
-        return ApiResponse.ok(service.errors(id));
+        Long userId = StpUtil.getLoginIdAsLong();
+        return ApiResponse.ok(service.errors(id, userId, dataScopeService.forUser(userId)));
     }
 
     @GetMapping(value = "/{id}/errors.csv", produces = "text/csv")
+    @SaCheckPermission("device:import")
     public void downloadErrors(@PathVariable Long id, HttpServletResponse response) throws IOException {
-        List<DeviceImportError> errors = service.errors(id);
+        Long userId = StpUtil.getLoginIdAsLong();
+        List<DeviceImportError> errors = service.errors(id, userId, dataScopeService.forUser(userId));
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setHeader("Content-Disposition", "attachment; filename=import-errors-" + id + ".csv");
         try (PrintWriter writer = response.getWriter()) {
