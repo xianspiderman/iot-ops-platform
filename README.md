@@ -2,7 +2,7 @@
 
 IoT Ops Platform is an operations console for teams that deliver and maintain connected devices. It keeps projects, products, device inventory and work orders in one auditable workflow, so an incident can be traced from the affected device to the responsible operator and every state change.
 
-> Current source version: **v0.2.0** — correctness and bulk-processing release. Later tagged versions add automation and production-facing operability; see [Evolution](docs/evolution.md).
+> Current source version: **v0.3.0** — automation and reliability release. The v1.0.0 release completes production-facing operability; see [Evolution](docs/evolution.md).
 
 ## Current capabilities
 
@@ -15,6 +15,10 @@ IoT Ops Platform is an operations console for teams that deliver and maintain co
 - Stable one-to-many paging: page the work-order table first, then batch-load device relations
 - Excel device import with original row numbers, format/business validation, file/database duplicates, task status and CSV error output
 - Bounded key collection, batched database lookup, `Set`/`Map` classification and MyBatis XML batch insert
+- RocketMQ alarm consumer with `eventId` pre-check, database uniqueness, local transaction and safe concurrent redelivery
+- Bad-message and system-failure classification, event result lookup, correction confirmation and idempotent manual replay
+- XXL-JOB timeout handler with bounded candidate scans, one transaction per work order, conditional timeout update and `SYSTEM` track
+- Timeout execution metrics, isolated failure records, safe rerun and manual compensation
 - Sa-Token sign-in and protected API routes
 - Flyway-managed MySQL schema and generic demonstration data
 - Vue 3 administration console for sign-in, dashboard, devices and work orders
@@ -29,10 +33,16 @@ flowchart LR
     APP --> MASTER[Projects and products]
     APP --> DEVICE[Device inventory]
     APP --> WO[Work orders]
+    APP --> ALARM[Alarm processing]
+    APP --> JOB[Timeout inspection]
     AUTH --> MYSQL[(MySQL)]
     MASTER --> MYSQL
     DEVICE --> MYSQL
     WO --> MYSQL
+    ALARM --> MYSQL
+    JOB --> MYSQL
+    MQ[RocketMQ] --> ALARM
+    XXL[XXL-JOB] --> JOB
     AUTH -. later permission cache .-> REDIS[(Redis)]
 ```
 
@@ -50,6 +60,8 @@ The backend is one deployable application split by business capability. This kee
 | Flyway | 13.6.0 | Current Java 21-capable engine; MySQL support is included explicitly |
 | MySQL | 8.4 | LTS database line used by local infrastructure |
 | EasyExcel | 4.0.3 | Streaming workbook decoding and typed import rows |
+| RocketMQ Spring | 2.3.6 | Boot 3-compatible listener integration; broker remains optional for core startup |
+| XXL-JOB | 3.4.2 | External scheduling and execution history, while business results remain locally auditable |
 | Vue / Vite | 3.5.42 / 8.3.0 | Current frontend baseline; Vite 8 requires Node 20.19+ |
 
 Dependency versions were selected from official project documentation and registries on 2026-09-15, then checked by compiling the actual project. Maven Wrapper 3.9.9 is committed, so a global Maven installation is not required.
@@ -86,6 +98,8 @@ docker compose -f deploy/compose.infrastructure.yml down
 3. Create a work order for one or more devices.
 4. Accept, submit and verify a work order; conditional updates reject stale or concurrent actions.
 5. Upload a workbook in Device imports, then inspect or download rejected-row reasons.
+6. Open Reliability, run timeout inspection, inspect task metrics and compensate an injected failure.
+7. Publish an alarm event, then inspect the alarm or correct and replay a rejected event.
 
 ## Verification
 
@@ -96,7 +110,7 @@ npm ci
 npm run build
 ```
 
-At v0.2.0, `mvnw.cmd verify` runs 6 unit tests and 7 integration tests against an actual MySQL 8.4.11 Testcontainer. The suite covers concurrent acceptance, state transitions, transaction rollback, one-to-many paging and import success/error/rollback behavior. Scheduler and message-consumption evidence is added in v0.3.0. No performance claim is made until a reproducible measurement has been recorded.
+At v0.3.0, `mvnw.cmd verify` runs 8 unit tests and 14 integration tests against an actual MySQL 8.4.11 Testcontainer. In addition to work-order and import evidence, the suite covers first/duplicate/concurrent alarm delivery, bad-message correction, system retry, repeated inspection, per-item rollback, recovery rerun and manual compensation. No performance claim is made until a reproducible measurement has been recorded.
 
 ## Roadmap recorded as real releases
 

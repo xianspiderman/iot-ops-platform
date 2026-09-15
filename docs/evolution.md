@@ -63,3 +63,33 @@ v0.2.0 adds the complete state machine and real-MySQL evidence, then replaces pe
 **Choice and flow.** v0.2.0 pages `work_order` first, collects only that page's IDs, performs one relation query, groups by order ID, and assembles views in page order. A nested query per order was rejected because it becomes N+1 database access. A single aggregated SQL query remains possible, but is database-specific and makes filtering/count behavior less transparent.
 
 **Evidence and boundary.** With two orders and unequal relation counts, MySQL tests request page size one and observe a total of two distinct parents, one parent on each page, and complete device IDs for both. The approach costs one additional query per page; it remains stable and predictable until measured latency or exceptionally wide pages justify an aggregate alternative.
+
+## v0.3.0 — automation and reliability
+
+### Case 4: synchronous event handling to RocketMQ consumption
+
+**Business problem -> first candidate.** Device events may arrive faster than a request thread should persist and classify them. Direct synchronous handling is simple and was enough while v0.1.0 and v0.2.0 had no external event ingress, but it couples a producer to database latency and provides no broker retry after a transient failure.
+
+**Candidates -> choice.** Database polling, an in-process executor and RocketMQ were compared. Polling needs a producer-side event table; an in-process executor loses work when the process stops. RocketMQ adds an operational dependency, but supplies durable delivery and retry, so v0.3.0 adds an optional consumer adapter. The domain processor remains callable without a broker, which makes exception rules testable and lets the platform start with messaging disabled.
+
+**Flow -> exception handling.** The listener delegates the raw message to the processor. A valid event is written in one local transaction: alarm row, optional device state update, and event result. A business-bad message is stored and acknowledged; a system exception is stored in a separate transaction and rethrown so RocketMQ retries. Logs carry `eventId`, alarm ID and the request ID where applicable. The broker and database do not share a distributed transaction, so correctness relies on redelivery plus idempotency.
+
+**Evidence -> cost.** Unit tests show the listener acknowledges classified business failures and propagates system failures. MySQL integration tests cover first delivery, duplicate delivery, two-thread concurrent delivery, business-bad correction/replay and an injected storage failure followed by successful retry. The operational cost is a broker and at-least-once semantics; exactly-once transport was rejected because business-level idempotency is still required.
+
+### Case 5: ordinary insert to eventId idempotency
+
+**Risk -> layered decision.** A pre-query avoids most repeat work but is not a concurrency lock: two consumers can both observe no row. A distributed lock adds expiry and ownership failure modes. The chosen path performs a fast `eventId` pre-query and keeps unique keys on both `alarm.event_id` and `alarm_event_record.event_id`. A unique conflict is considered duplicate success only when the committed event result is `PROCESSED`; other integrity failures remain system failures and are retried.
+
+**Manual recovery.** A bad record owns its original `eventId`. Correction can change device or event fields but cannot change that identity. Confirmation stores corrected JSON and the operator, replay uses the same transactional path, and a processed record short-circuits later manual or broker replay. This prevents a recovery action from creating a second alarm.
+
+**Evidence and boundary.** The concurrent MySQL test releases two processor calls together and observes exactly one `PROCESSED`, one `DUPLICATE` and one alarm row. The extra result row and two unique indexes consume storage, accepted for auditability and deterministic recovery. Partitioning or retention jobs are deferred until actual event volume establishes a need.
+
+### Case 6: simple scan to isolated timeout processing
+
+**Business problem -> exposed failure mode.** A single transaction around a batch of expired work orders makes one track-insert failure roll back every successful item. Updating every candidate in one SQL statement is fast but cannot give each work order a track and failure reason with the same clarity.
+
+**Candidates -> choice -> sequence.** The implemented XXL-JOB handler first reads a bounded candidate list using `timeout_flag = 0`, deadline, non-terminal status and an index. A coordinator records one execution, then calls a separate proxied service with `REQUIRES_NEW` for each work order. That transaction performs a conditional update, checks `affectedRows`, and writes a `SYSTEM` track. Failures are caught outside the item transaction and upserted in another transaction; the rest of the batch continues.
+
+**Repeat and recovery paths.** Repeated execution excludes already-marked rows. A race that changes state or timeout flag produces `affectedRows = 0` and is counted as skipped. A later scheduled run can process a previously failed row and resolve its failure record automatically. An operator may invoke the same item service through the compensation endpoint; already completed or terminal work is treated as safely resolved, while a still-ineligible active order remains an explicit business conflict.
+
+**Evidence -> tradeoff -> next condition.** MySQL trigger injection proves the timeout flag rolls back when its track fails, another order in the same scan commits, a recovery scan resolves the stored failure, and manual compensation follows the same invariant. The repeated-run test observes one track only. Per-item transactions cost more connections and commits than a set-based update; sharding or cursor scans will be considered only if measured candidate counts cannot finish within the configured schedule window.

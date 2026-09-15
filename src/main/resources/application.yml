@@ -55,6 +55,11 @@ springdoc:
   api-docs:
     path: /v3/api-docs
 
+rocketmq:
+  name-server: ${ROCKETMQ_NAME_SERVER:localhost:9876}
+  consumer:
+    group: ${ROCKETMQ_CONSUMER_GROUP:iot-ops-alarm-consumer}
+
 management:
   endpoints:
     web:
@@ -72,3 +77,23 @@ iot-ops:
   import:
     max-rows: ${IMPORT_MAX_ROWS:10000}
     insert-batch-size: ${IMPORT_INSERT_BATCH_SIZE:200}
+  alarm:
+    rocketmq-enabled: ${ALARM_ROCKETMQ_ENABLED:false}
+    topic: ${ALARM_TOPIC:iot-device-alarm}
+  timeout:
+    batch-size: ${TIMEOUT_SCAN_BATCH_SIZE:100}
+  xxl-job:
+    enabled: ${XXL_JOB_ENABLED:false}
+
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN_ADDRESSES:http://localhost:8088/xxl-job-admin}
+    access-token: ${XXL_JOB_ACCESS_TOKEN:default_token}
+    executor:
+      app-name: ${XXL_JOB_EXECUTOR_APP_NAME:iot-ops-platform}
+      address: ${XXL_JOB_EXECUTOR_ADDRESS:}
+      ip: ${XXL_JOB_EXECUTOR_IP:}
+      port: ${XXL_JOB_EXECUTOR_PORT:9999}
+      log-path: ${XXL_JOB_LOG_PATH:./logs/xxl-job}
+      log-retention-days: ${XXL_JOB_LOG_RETENTION_DAYS:30}

@@ -1,6 +1,8 @@
 package io.github.xianspiderman.iotops.integration;
 
 import com.alibaba.excel.EasyExcel;
+import io.github.xianspiderman.iotops.alarm.AlarmEventProcessor;
+import io.github.xianspiderman.iotops.alarm.AlarmProcessOutcome;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
 import io.github.xianspiderman.iotops.device.Device;
@@ -15,6 +17,10 @@ import io.github.xianspiderman.iotops.workorder.WorkOrder;
 import io.github.xianspiderman.iotops.workorder.WorkOrderService;
 import io.github.xianspiderman.iotops.workorder.WorkOrderStatus;
 import io.github.xianspiderman.iotops.workorder.WorkOrderView;
+import io.github.xianspiderman.iotops.timeout.TimeoutFailure;
+import io.github.xianspiderman.iotops.timeout.TimeoutFailureMapper;
+import io.github.xianspiderman.iotops.timeout.TimeoutInspectionService;
+import io.github.xianspiderman.iotops.timeout.TimeoutJobExecution;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,10 +77,22 @@ class MySqlBusinessFlowIT {
     private DeviceImportTaskStateService taskStateService;
     @Autowired
     private DeviceImportWriteService importWriteService;
+    @Autowired
+    private AlarmEventProcessor alarmEventProcessor;
+    @Autowired
+    private TimeoutInspectionService timeoutInspectionService;
+    @Autowired
+    private TimeoutFailureMapper timeoutFailureMapper;
 
     @BeforeEach
     void cleanBusinessRows() {
         jdbc.execute("DROP TRIGGER IF EXISTS reject_submit_track");
+        jdbc.execute("DROP TRIGGER IF EXISTS reject_alarm_insert");
+        jdbc.execute("DROP TRIGGER IF EXISTS reject_timeout_track");
+        jdbc.update("DELETE FROM alarm_event_record");
+        jdbc.update("DELETE FROM alarm");
+        jdbc.update("DELETE FROM timeout_failure");
+        jdbc.update("DELETE FROM timeout_job_execution");
         jdbc.update("DELETE FROM work_order_track");
         jdbc.update("DELETE FROM work_order_device");
         jdbc.update("DELETE FROM work_order");
@@ -92,6 +110,8 @@ class MySqlBusinessFlowIT {
     @AfterEach
     void removeFailureTrigger() {
         jdbc.execute("DROP TRIGGER IF EXISTS reject_submit_track");
+        jdbc.execute("DROP TRIGGER IF EXISTS reject_alarm_insert");
+        jdbc.execute("DROP TRIGGER IF EXISTS reject_timeout_track");
     }
 
     @Test
@@ -235,6 +255,155 @@ class MySqlBusinessFlowIT {
         assertThat(importService.getTask(task.getId()).getStatus()).isEqualTo(DeviceImportStatus.FAILED.name());
     }
 
+    @Test
+    void firstAndDuplicateAlarmMessagesCreateOnlyOneAlarm() {
+        String payload = alarmJson("alarm-first", "DEMO-SN-001", "DEVICE_OFFLINE");
+
+        assertThat(alarmEventProcessor.processRaw(payload)).isEqualTo(AlarmProcessOutcome.PROCESSED);
+        assertThat(alarmEventProcessor.processRaw(payload)).isEqualTo(AlarmProcessOutcome.DUPLICATE);
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM alarm WHERE event_id = 'alarm-first'", Integer.class))
+                .isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT process_status FROM alarm_event_record WHERE event_id = 'alarm-first'", String.class))
+                .isEqualTo("PROCESSED");
+        assertThat(jdbc.queryForObject("SELECT online_status FROM device WHERE sn = 'DEMO-SN-001'", String.class))
+                .isEqualTo("OFFLINE");
+    }
+
+    @Test
+    void concurrentAlarmDeliveryIsIdempotentAtTheDatabaseBoundary() throws Exception {
+        String payload = alarmJson("alarm-concurrent", "DEMO-SN-001", "LOW_BATTERY");
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Callable<AlarmProcessOutcome> attempt = () -> {
+                ready.countDown();
+                go.await();
+                return alarmEventProcessor.processRaw(payload);
+            };
+            Future<AlarmProcessOutcome> first = executor.submit(attempt);
+            Future<AlarmProcessOutcome> second = executor.submit(attempt);
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            go.countDown();
+            assertThat(List.of(first.get(), second.get()))
+                    .containsExactlyInAnyOrder(AlarmProcessOutcome.PROCESSED, AlarmProcessOutcome.DUPLICATE);
+        }
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM alarm WHERE event_id = 'alarm-concurrent'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void badAlarmCanBeCorrectedConfirmedAndReprocessedOnce() {
+        String invalid = alarmJson("alarm-corrected", "UNKNOWN-SN", "HIGH_TEMPERATURE");
+        assertThat(alarmEventProcessor.processRaw(invalid)).isEqualTo(AlarmProcessOutcome.BUSINESS_BAD_MESSAGE);
+        Long recordId = jdbc.queryForObject(
+                "SELECT id FROM alarm_event_record WHERE event_id = 'alarm-corrected'", Long.class);
+        assertThat(jdbc.queryForObject(
+                "SELECT process_status FROM alarm_event_record WHERE id = ?", String.class, recordId))
+                .isEqualTo("BUSINESS_BAD_MESSAGE");
+
+        alarmEventProcessor.confirm(recordId,
+                alarmJson("alarm-corrected", "DEMO-SN-001", "HIGH_TEMPERATURE"), 1L);
+        assertThat(alarmEventProcessor.reprocess(recordId)).isEqualTo(AlarmProcessOutcome.PROCESSED);
+        assertThat(alarmEventProcessor.reprocess(recordId)).isEqualTo(AlarmProcessOutcome.DUPLICATE);
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM alarm WHERE event_id = 'alarm-corrected'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void systemAlarmFailureIsRecordedThrownAndCanSucceedOnRetry() {
+        jdbc.execute("""
+                CREATE TRIGGER reject_alarm_insert BEFORE INSERT ON alarm
+                FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected alarm storage failure'
+                """);
+        String payload = alarmJson("alarm-retry", "DEMO-SN-001", "LOW_BATTERY");
+
+        assertThatThrownBy(() -> alarmEventProcessor.processRaw(payload)).isInstanceOf(RuntimeException.class);
+        assertThat(jdbc.queryForObject(
+                "SELECT process_status FROM alarm_event_record WHERE event_id = 'alarm-retry'", String.class))
+                .isEqualTo("SYSTEM_FAILURE");
+
+        jdbc.execute("DROP TRIGGER reject_alarm_insert");
+        assertThat(alarmEventProcessor.processRaw(payload)).isEqualTo(AlarmProcessOutcome.PROCESSED);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM alarm WHERE event_id = 'alarm-retry'", Integer.class))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void timeoutInspectionIsSafeToRepeat() {
+        WorkOrder order = createOrder(List.of(1L));
+        expire(order.getId());
+
+        TimeoutJobExecution first = timeoutInspectionService.run("TEST");
+        TimeoutJobExecution second = timeoutInspectionService.run("TEST");
+
+        assertThat(first.getScannedCount()).isEqualTo(1);
+        assertThat(first.getSuccessCount()).isEqualTo(1);
+        assertThat(second.getScannedCount()).isZero();
+        assertThat(jdbc.queryForObject("SELECT timeout_flag FROM work_order WHERE id = ?", Boolean.class,
+                order.getId())).isTrue();
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM work_order_track WHERE work_order_id = ? AND action = 'TIMEOUT_MARK'",
+                Integer.class, order.getId())).isEqualTo(1);
+    }
+
+    @Test
+    void oneTimeoutFailureRollsBackOnlyThatOrderAndRecoveryRunResolvesIt() {
+        WorkOrder failing = createOrder(List.of(1L));
+        WorkOrder healthy = createOrder(List.of(2L));
+        expire(failing.getId());
+        expire(healthy.getId());
+        jdbc.execute("""
+                CREATE TRIGGER reject_timeout_track BEFORE INSERT ON work_order_track
+                FOR EACH ROW
+                BEGIN
+                  IF NEW.action = 'TIMEOUT_MARK' AND NEW.work_order_id = %d THEN
+                    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected timeout track failure';
+                  END IF;
+                END
+                """.formatted(failing.getId()));
+
+        TimeoutJobExecution first = timeoutInspectionService.run("TEST");
+        assertThat(first.getSuccessCount()).isEqualTo(1);
+        assertThat(first.getFailureCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT timeout_flag FROM work_order WHERE id = ?", Boolean.class,
+                failing.getId())).isFalse();
+        assertThat(jdbc.queryForObject("SELECT timeout_flag FROM work_order WHERE id = ?", Boolean.class,
+                healthy.getId())).isTrue();
+        assertThat(jdbc.queryForObject(
+                "SELECT status FROM timeout_failure WHERE work_order_id = ?", String.class, failing.getId()))
+                .isEqualTo("PENDING");
+
+        jdbc.execute("DROP TRIGGER reject_timeout_track");
+        TimeoutJobExecution recovery = timeoutInspectionService.run("TEST_RECOVERY");
+        assertThat(recovery.getSuccessCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT status FROM timeout_failure WHERE work_order_id = ?", String.class, failing.getId()))
+                .isEqualTo("RESOLVED");
+    }
+
+    @Test
+    void pendingTimeoutFailureSupportsManualCompensation() {
+        WorkOrder order = createOrder(List.of(1L));
+        expire(order.getId());
+        jdbc.execute("""
+                CREATE TRIGGER reject_timeout_track BEFORE INSERT ON work_order_track
+                FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected timeout track failure'
+                """);
+        timeoutInspectionService.run("TEST");
+        TimeoutFailure failure = timeoutFailureMapper.selectOne(
+                com.baomidou.mybatisplus.core.toolkit.Wrappers.<TimeoutFailure>lambdaQuery()
+                        .eq(TimeoutFailure::getWorkOrderId, order.getId()));
+
+        jdbc.execute("DROP TRIGGER reject_timeout_track");
+        timeoutInspectionService.compensate(failure.getId(), 1L);
+
+        assertThat(timeoutFailureMapper.selectById(failure.getId()).getStatus()).isEqualTo("RESOLVED");
+        assertThat(jdbc.queryForObject("SELECT timeout_flag FROM work_order WHERE id = ?", Boolean.class,
+                order.getId())).isTrue();
+    }
+
     private Callable<Boolean> acceptAttempt(Long orderId, Long userId, CountDownLatch ready, CountDownLatch go) {
         return () -> {
             ready.countDown();
@@ -251,6 +420,18 @@ class MySqlBusinessFlowIT {
     private WorkOrder createOrder(List<Long> deviceIds) {
         return workOrderService.create(new WorkOrderService.CreateCommand(
                 1L, deviceIds, "Field incident", "Investigate connectivity", "NORMAL"), 1L);
+    }
+
+    private void expire(Long workOrderId) {
+        jdbc.update("UPDATE work_order SET deadline_time = DATE_SUB(NOW(3), INTERVAL 1 HOUR) WHERE id = ?",
+                workOrderId);
+    }
+
+    private String alarmJson(String eventId, String deviceSn, String eventType) {
+        return """
+                {"eventId":"%s","deviceSn":"%s","eventType":"%s","severity":"HIGH",
+                 "occurredAt":"2026-09-15T10:00:00","data":{"source":"integration-test"}}
+                """.formatted(eventId, deviceSn, eventType);
     }
 
     private DeviceImportRow row(String sn, String name, String projectCode, String productCode, String imei) {

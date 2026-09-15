@@ -22,6 +22,8 @@ public class WorkOrder {
     private Long handlerId;
     private String solution;
     private LocalDateTime deadlineTime;
+    private Boolean timeoutFlag;
+    private LocalDateTime timeoutTime;
     private LocalDateTime acceptTime;
     private LocalDateTime submitTime;
     private LocalDateTime closeTime;

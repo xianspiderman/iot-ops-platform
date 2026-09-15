@@ -2,11 +2,31 @@ package io.github.xianspiderman.iotops.workorder;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
+    @Select("""
+            SELECT id FROM work_order
+             WHERE timeout_flag = 0 AND deadline_time < #{now}
+               AND status NOT IN ('CLOSED', 'CANCELED')
+             ORDER BY deadline_time, id
+             LIMIT #{batchSize}
+            """)
+    List<Long> selectTimeoutCandidates(@Param("now") LocalDateTime now,
+                                       @Param("batchSize") int batchSize);
+
+    @Update("""
+            UPDATE work_order SET timeout_flag = 1, timeout_time = #{timeoutTime}
+             WHERE id = #{workOrderId} AND timeout_flag = 0 AND deadline_time < #{timeoutTime}
+               AND status NOT IN ('CLOSED', 'CANCELED')
+            """)
+    int markTimeoutIfCandidate(@Param("workOrderId") Long workOrderId,
+                               @Param("timeoutTime") LocalDateTime timeoutTime);
+
     @Update("""
             UPDATE work_order
                SET status = 'PROCESSING', handler_id = #{operatorId}, accept_time = #{acceptTime}

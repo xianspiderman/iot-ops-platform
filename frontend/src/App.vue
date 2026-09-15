@@ -20,6 +20,7 @@ function logout() {
         <el-menu-item index="/devices"><span>Devices</span></el-menu-item>
         <el-menu-item index="/device-imports"><span>Device imports</span></el-menu-item>
         <el-menu-item index="/work-orders"><span>Work orders</span></el-menu-item>
+        <el-menu-item index="/reliability"><span>Reliability</span></el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

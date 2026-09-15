@@ -1,18 +1,15 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import LoginView from './views/LoginView.vue'
-import DashboardView from './views/DashboardView.vue'
-import DevicesView from './views/DevicesView.vue'
-import WorkOrdersView from './views/WorkOrdersView.vue'
-import DeviceImportsView from './views/DeviceImportsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', component: LoginView, meta: { public: true } },
-    { path: '/', component: DashboardView },
-    { path: '/devices', component: DevicesView },
-    { path: '/device-imports', component: DeviceImportsView },
-    { path: '/work-orders', component: WorkOrdersView },
+    { path: '/', component: () => import('./views/DashboardView.vue') },
+    { path: '/devices', component: () => import('./views/DevicesView.vue') },
+    { path: '/device-imports', component: () => import('./views/DeviceImportsView.vue') },
+    { path: '/work-orders', component: () => import('./views/WorkOrdersView.vue') },
+    { path: '/reliability', component: () => import('./views/ReliabilityView.vue') },
   ],
 })
 
