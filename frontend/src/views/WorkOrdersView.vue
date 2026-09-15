@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type ApiResponse } from '../api'
 
-interface WorkOrder { id: number; workOrderNo: string; title: string; priority: string; status: string; deadlineTime: string }
+interface WorkOrder { id: number; workOrderNo: string; title: string; priority: string; status: string; deadlineTime: string; deviceIds: number[] }
 interface PageResult<T> { total: number; records: T[] }
 
 const rows = ref<WorkOrder[]>([])
@@ -32,6 +32,33 @@ async function accept(id: number) {
   catch (error: any) { ElMessage.error(error.response?.data?.message ?? 'Accept failed') }
 }
 
+async function submit(id: number) {
+  try {
+    const { value } = await ElMessageBox.prompt('Describe the completed work.', 'Submit for verification', { inputType: 'textarea', inputValidator: (text) => !!text?.trim() || 'Solution is required' })
+    await api.post(`/work-orders/${id}/submit`, { solution: value })
+    ElMessage.success('Submitted for verification')
+    await load()
+  } catch (error: any) { if (error !== 'cancel') ElMessage.error(error.response?.data?.message ?? 'Submit failed') }
+}
+
+async function verify(id: number) {
+  try {
+    const { value } = await ElMessageBox.prompt('Optional verification note.', 'Verify and close', { inputValue: 'Verified on site' })
+    await api.post(`/work-orders/${id}/verify`, { remark: value })
+    ElMessage.success('Work order closed')
+    await load()
+  } catch (error: any) { if (error !== 'cancel') ElMessage.error(error.response?.data?.message ?? 'Verification failed') }
+}
+
+async function cancel(id: number) {
+  try {
+    const { value } = await ElMessageBox.prompt('Why is this work order being canceled?', 'Cancel work order', { inputValidator: (text) => !!text?.trim() || 'Reason is required' })
+    await api.post(`/work-orders/${id}/cancel`, { reason: value })
+    ElMessage.success('Work order canceled')
+    await load()
+  } catch (error: any) { if (error !== 'cancel') ElMessage.error(error.response?.data?.message ?? 'Cancel failed') }
+}
+
 onMounted(load)
 </script>
 
@@ -43,7 +70,13 @@ onMounted(load)
       <el-table-column prop="title" label="Title" min-width="240" />
       <el-table-column prop="priority" label="Priority" width="110" />
       <el-table-column prop="status" label="Status" width="130" />
-      <el-table-column label="Action" width="120"><template #default="scope"><el-button v-if="scope.row.status === 'WAITING'" link type="primary" @click="accept(scope.row.id)">Accept</el-button></template></el-table-column>
+      <el-table-column label="Devices" width="90"><template #default="scope">{{ scope.row.deviceIds?.length ?? 0 }}</template></el-table-column>
+      <el-table-column label="Action" min-width="240"><template #default="scope">
+        <el-button v-if="scope.row.status === 'WAITING'" link type="primary" @click="accept(scope.row.id)">Accept</el-button>
+        <el-button v-if="scope.row.status === 'PROCESSING'" link type="primary" @click="submit(scope.row.id)">Submit</el-button>
+        <el-button v-if="scope.row.status === 'WAIT_VERIFY'" link type="success" @click="verify(scope.row.id)">Verify</el-button>
+        <el-button v-if="!['CLOSED', 'CANCELED'].includes(scope.row.status)" link type="danger" @click="cancel(scope.row.id)">Cancel</el-button>
+      </template></el-table-column>
     </el-table>
     <el-dialog v-model="dialog" title="Create work order" width="560px">
       <el-form label-position="top">
@@ -56,4 +89,3 @@ onMounted(load)
     </el-dialog>
   </section>
 </template>
-

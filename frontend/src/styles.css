@@ -31,4 +31,5 @@ h1 small { color: #91a0ae; font-size: 16px; }
 .login-card h2 { margin-bottom: 4px; font-size: 26px; }
 .login-card p { margin: 0 0 26px; color: #758493; }
 .wide { width: 100%; }
-
+.import-panel { display: flex; align-items: center; gap: 18px; margin-bottom: 22px; border: 0 !important; }
+.import-panel small { color: #788795; }

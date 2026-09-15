@@ -15,4 +15,41 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
     int acceptIfWaiting(@Param("workOrderId") Long workOrderId,
                         @Param("operatorId") Long operatorId,
                         @Param("acceptTime") LocalDateTime acceptTime);
+
+    @Update("""
+            UPDATE work_order
+               SET status = 'WAIT_VERIFY', solution = #{solution}, submit_time = #{submitTime}
+             WHERE id = #{workOrderId} AND status = 'PROCESSING' AND handler_id = #{operatorId}
+            """)
+    int submitIfProcessingByHandler(@Param("workOrderId") Long workOrderId,
+                                    @Param("operatorId") Long operatorId,
+                                    @Param("solution") String solution,
+                                    @Param("submitTime") LocalDateTime submitTime);
+
+    @Update("""
+            UPDATE work_order
+               SET status = 'CLOSED', close_time = #{closeTime}
+             WHERE id = #{workOrderId} AND status = 'WAIT_VERIFY'
+            """)
+    int closeIfWaitingVerify(@Param("workOrderId") Long workOrderId,
+                             @Param("closeTime") LocalDateTime closeTime);
+
+    @Update("""
+            UPDATE work_order
+               SET status = 'CANCELED', cancel_time = #{cancelTime}
+             WHERE id = #{workOrderId} AND status = #{beforeStatus}
+               AND status IN ('WAITING', 'PROCESSING', 'WAIT_VERIFY')
+            """)
+    int cancelIfCurrent(@Param("workOrderId") Long workOrderId,
+                        @Param("beforeStatus") String beforeStatus,
+                        @Param("cancelTime") LocalDateTime cancelTime);
+
+    @Update("""
+            UPDATE work_order
+               SET handler_id = #{newHandlerId}
+             WHERE id = #{workOrderId} AND status = 'PROCESSING' AND handler_id = #{currentHandlerId}
+            """)
+    int transferIfProcessingByHandler(@Param("workOrderId") Long workOrderId,
+                                      @Param("currentHandlerId") Long currentHandlerId,
+                                      @Param("newHandlerId") Long newHandlerId);
 }

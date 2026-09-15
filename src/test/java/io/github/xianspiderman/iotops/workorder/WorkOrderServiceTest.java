@@ -1,6 +1,7 @@
 package io.github.xianspiderman.iotops.workorder;
 
 import io.github.xianspiderman.iotops.common.BusinessException;
+import io.github.xianspiderman.iotops.auth.SysUserMapper;
 import io.github.xianspiderman.iotops.device.Device;
 import io.github.xianspiderman.iotops.device.DeviceMapper;
 import io.github.xianspiderman.iotops.project.Project;
@@ -36,6 +37,8 @@ class WorkOrderServiceTest {
     private DeviceMapper deviceMapper;
     @Mock
     private ProjectMapper projectMapper;
+    @Mock
+    private SysUserMapper userMapper;
 
     private WorkOrderService service;
 
@@ -43,7 +46,7 @@ class WorkOrderServiceTest {
     void setUp() {
         Clock clock = Clock.fixed(Instant.parse("2026-09-15T02:00:00Z"), ZoneId.of("Asia/Shanghai"));
         service = new WorkOrderService(workOrderMapper, relationMapper, trackMapper, deviceMapper,
-                projectMapper, clock);
+                projectMapper, userMapper, clock);
     }
 
     @Test

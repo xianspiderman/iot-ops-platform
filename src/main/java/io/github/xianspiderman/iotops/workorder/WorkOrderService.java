@@ -3,6 +3,8 @@ package io.github.xianspiderman.iotops.workorder;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import io.github.xianspiderman.iotops.auth.SysUser;
+import io.github.xianspiderman.iotops.auth.SysUserMapper;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
 import io.github.xianspiderman.iotops.device.Device;
@@ -17,6 +19,8 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Service
@@ -27,14 +31,34 @@ public class WorkOrderService {
     private final WorkOrderTrackMapper trackMapper;
     private final DeviceMapper deviceMapper;
     private final ProjectMapper projectMapper;
+    private final SysUserMapper userMapper;
     private final Clock clock;
 
-    public PageResult<WorkOrder> page(long page, long size, String status) {
+    public PageResult<WorkOrderView> page(long page, long size, String status) {
         IPage<WorkOrder> result = workOrderMapper.selectPage(new Page<>(page, Math.min(size, 100)),
                 Wrappers.<WorkOrder>lambdaQuery()
                         .eq(status != null && !status.isBlank(), WorkOrder::getStatus, status)
                         .orderByDesc(WorkOrder::getId));
-        return PageResult.from(result);
+        List<Long> orderIds = result.getRecords().stream().map(WorkOrder::getId).toList();
+        Map<Long, List<Long>> deviceIdsByOrder = orderIds.isEmpty()
+                ? Map.of()
+                : relationMapper.selectByWorkOrderIds(orderIds).stream().collect(Collectors.groupingBy(
+                        WorkOrderDevice::getWorkOrderId,
+                        Collectors.mapping(WorkOrderDevice::getDeviceId, Collectors.toList())));
+        List<WorkOrderView> records = result.getRecords().stream()
+                .map(order -> new WorkOrderView(order, deviceIdsByOrder.getOrDefault(order.getId(), List.of())))
+                .toList();
+        return new PageResult<>(result.getCurrent(), result.getSize(), result.getTotal(), records);
+    }
+
+    public WorkOrderDetail detail(Long workOrderId) {
+        WorkOrder order = requireOrder(workOrderId);
+        List<Long> deviceIds = relationMapper.selectByWorkOrderIds(List.of(workOrderId)).stream()
+                .map(WorkOrderDevice::getDeviceId).toList();
+        List<WorkOrderTrack> tracks = trackMapper.selectList(Wrappers.<WorkOrderTrack>lambdaQuery()
+                .eq(WorkOrderTrack::getWorkOrderId, workOrderId)
+                .orderByAsc(WorkOrderTrack::getId));
+        return new WorkOrderDetail(order, deviceIds, tracks);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -88,6 +112,58 @@ public class WorkOrderService {
                 WorkOrderStatus.PROCESSING.name(), "Work order accepted");
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public void submit(Long workOrderId, Long operatorId, String solution) {
+        WorkOrderStateMachine.requireTransition(WorkOrderStatus.PROCESSING.name(), WorkOrderStatus.WAIT_VERIFY);
+        int affected = workOrderMapper.submitIfProcessingByHandler(workOrderId, operatorId, solution.trim(),
+                LocalDateTime.now(clock));
+        if (affected != 1) {
+            throw new BusinessException("WORK_ORDER_SUBMIT_CONFLICT",
+                    "Only the current handler can submit a processing work order");
+        }
+        addTrack(workOrderId, operatorId, "USER", "SUBMIT", WorkOrderStatus.PROCESSING.name(),
+                WorkOrderStatus.WAIT_VERIFY.name(), "Work order submitted for verification");
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void verifyAndClose(Long workOrderId, Long operatorId, String remark) {
+        WorkOrderStateMachine.requireTransition(WorkOrderStatus.WAIT_VERIFY.name(), WorkOrderStatus.CLOSED);
+        int affected = workOrderMapper.closeIfWaitingVerify(workOrderId, LocalDateTime.now(clock));
+        if (affected != 1) {
+            throw new BusinessException("WORK_ORDER_VERIFY_CONFLICT",
+                    "Work order is not waiting for verification");
+        }
+        addTrack(workOrderId, operatorId, "USER", "VERIFY_CLOSE", WorkOrderStatus.WAIT_VERIFY.name(),
+                WorkOrderStatus.CLOSED.name(), remark == null || remark.isBlank() ? "Verified and closed" : remark.trim());
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void cancel(Long workOrderId, Long operatorId, String reason) {
+        WorkOrder order = requireOrder(workOrderId);
+        WorkOrderStateMachine.requireTransition(order.getStatus(), WorkOrderStatus.CANCELED);
+        int affected = workOrderMapper.cancelIfCurrent(workOrderId, order.getStatus(), LocalDateTime.now(clock));
+        if (affected != 1) {
+            throw new BusinessException("WORK_ORDER_CANCEL_CONFLICT", "Work order state changed; refresh and retry");
+        }
+        addTrack(workOrderId, operatorId, "USER", "CANCEL", order.getStatus(),
+                WorkOrderStatus.CANCELED.name(), reason.trim());
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void transfer(Long workOrderId, Long operatorId, Long newHandlerId, String reason) {
+        SysUser newHandler = userMapper.selectById(newHandlerId);
+        if (newHandler == null || !"ENABLED".equals(newHandler.getStatus())) {
+            throw new BusinessException("HANDLER_NOT_AVAILABLE", "Target handler does not exist or is disabled");
+        }
+        int affected = workOrderMapper.transferIfProcessingByHandler(workOrderId, operatorId, newHandlerId);
+        if (affected != 1) {
+            throw new BusinessException("WORK_ORDER_TRANSFER_CONFLICT",
+                    "Only the current handler can transfer a processing work order");
+        }
+        addTrack(workOrderId, operatorId, "USER", "TRANSFER", WorkOrderStatus.PROCESSING.name(),
+                WorkOrderStatus.PROCESSING.name(), "Transferred to user " + newHandlerId + ": " + reason.trim());
+    }
+
     private WorkOrderPriority parsePriority(String value) {
         try {
             return WorkOrderPriority.valueOf(value.toUpperCase());
@@ -99,6 +175,14 @@ public class WorkOrderService {
     private String generateNo(LocalDateTime time) {
         return "WO-" + time.format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss")) + "-"
                 + ThreadLocalRandom.current().nextInt(100000, 1000000);
+    }
+
+    private WorkOrder requireOrder(Long workOrderId) {
+        WorkOrder order = workOrderMapper.selectById(workOrderId);
+        if (order == null) {
+            throw new BusinessException("WORK_ORDER_NOT_FOUND", "Work order does not exist");
+        }
+        return order;
     }
 
     private void addTrack(Long orderId, Long operatorId, String operatorType, String action,

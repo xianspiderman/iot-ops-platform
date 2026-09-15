@@ -26,10 +26,15 @@ public class WorkOrderController {
     private final WorkOrderService service;
 
     @GetMapping
-    public ApiResponse<PageResult<WorkOrder>> page(@RequestParam(defaultValue = "1") long page,
-                                                   @RequestParam(defaultValue = "20") long size,
-                                                   @RequestParam(required = false) String status) {
+    public ApiResponse<PageResult<WorkOrderView>> page(@RequestParam(defaultValue = "1") long page,
+                                                       @RequestParam(defaultValue = "20") long size,
+                                                       @RequestParam(required = false) String status) {
         return ApiResponse.ok(service.page(page, size, status));
+    }
+
+    @GetMapping("/{id}")
+    public ApiResponse<WorkOrderDetail> detail(@PathVariable Long id) {
+        return ApiResponse.ok(service.detail(id));
     }
 
     @PostMapping
@@ -45,11 +50,47 @@ public class WorkOrderController {
         return ApiResponse.ok();
     }
 
+    @PostMapping("/{id}/submit")
+    public ApiResponse<Void> submit(@PathVariable Long id, @Valid @RequestBody SubmitRequest request) {
+        service.submit(id, StpUtil.getLoginIdAsLong(), request.solution());
+        return ApiResponse.ok();
+    }
+
+    @PostMapping("/{id}/verify")
+    public ApiResponse<Void> verify(@PathVariable Long id, @Valid @RequestBody VerifyRequest request) {
+        service.verifyAndClose(id, StpUtil.getLoginIdAsLong(), request.remark());
+        return ApiResponse.ok();
+    }
+
+    @PostMapping("/{id}/cancel")
+    public ApiResponse<Void> cancel(@PathVariable Long id, @Valid @RequestBody CancelRequest request) {
+        service.cancel(id, StpUtil.getLoginIdAsLong(), request.reason());
+        return ApiResponse.ok();
+    }
+
+    @PostMapping("/{id}/transfer")
+    public ApiResponse<Void> transfer(@PathVariable Long id, @Valid @RequestBody TransferRequest request) {
+        service.transfer(id, StpUtil.getLoginIdAsLong(), request.newHandlerId(), request.reason());
+        return ApiResponse.ok();
+    }
+
     public record CreateRequest(@NotNull Long projectId,
                                 @NotEmpty List<@NotNull Long> deviceIds,
                                 @NotBlank @Size(max = 160) String title,
                                 @NotBlank @Size(max = 1000) String description,
                                 @NotBlank String priority) {
     }
-}
 
+    public record SubmitRequest(@NotBlank @Size(max = 1000) String solution) {
+    }
+
+    public record VerifyRequest(@Size(max = 1000) String remark) {
+    }
+
+    public record CancelRequest(@NotBlank @Size(max = 1000) String reason) {
+    }
+
+    public record TransferRequest(@NotNull Long newHandlerId,
+                                  @NotBlank @Size(max = 800) String reason) {
+    }
+}

@@ -18,6 +18,7 @@ function logout() {
       <el-menu router :default-active="route.path" background-color="transparent" text-color="#b9c6d6" active-text-color="#ffffff">
         <el-menu-item index="/"><span>Overview</span></el-menu-item>
         <el-menu-item index="/devices"><span>Devices</span></el-menu-item>
+        <el-menu-item index="/device-imports"><span>Device imports</span></el-menu-item>
         <el-menu-item index="/work-orders"><span>Work orders</span></el-menu-item>
       </el-menu>
     </el-aside>
@@ -30,4 +31,3 @@ function logout() {
     </el-container>
   </el-container>
 </template>
-

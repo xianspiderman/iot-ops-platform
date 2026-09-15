@@ -23,8 +23,9 @@ public class WorkOrder {
     private String solution;
     private LocalDateTime deadlineTime;
     private LocalDateTime acceptTime;
+    private LocalDateTime submitTime;
     private LocalDateTime closeTime;
+    private LocalDateTime cancelTime;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }
-
