@@ -40,6 +40,37 @@
 
 分页接口使用从 1 开始的 `page` 和最大 100 的 `size`。具体字段、校验约束和状态值以 OpenAPI 页面为准。
 
+## 管理端、OpenAPI 与 XXL-JOB 串联演示
+
+管理端是业务操作入口；OpenAPI 是同一后端接口的查看、调试和独立验证入口；XXL-JOB 是任务调度控制端，按周期或手动触发后端注册的 `workOrderTimeoutInspection`。三者最终复用同一个后端业务 Service 和 MySQL 数据。
+
+正常链路：
+
+1. 在管理端“工单管理”新建一张关联设备 1 的工单。为缩短本机演示等待，把最新非终态工单准备为已到期：
+
+   ```powershell
+   docker compose exec -T mysql mysql -uiot_ops -piot_ops_dev iot_ops -e "UPDATE work_order SET deadline_time=DATE_SUB(NOW(3), INTERVAL 1 MINUTE), timeout_flag=0, timeout_time=NULL WHERE status NOT IN ('CLOSED','CANCELED') ORDER BY id DESC LIMIT 1;"
+   ```
+
+2. 在工单“详情与轨迹”中确认到期时间已过去、超时状态仍为“未超时”。
+3. 登录 `http://localhost:8088`，在任务管理找到 `workOrderTimeoutInspection` 并执行一次。
+4. 回到管理端“可靠性中心 → 巡检执行记录”，预期出现来源为“XXL-JOB”的成功记录；再查看工单详情，预期出现超时时间和操作方为“系统”的“标记超时”轨迹。
+5. 在 OpenAPI 携带登录响应给出的 token Header，调用 `GET /api/work-orders/{id}` 和 `GET /api/timeout-inspections/executions`，独立核对 `timeoutFlag`、`timeoutTime`、SYSTEM 轨迹与任务计数。
+
+失败与人工补偿只在本机演示环境执行。先准备另一张到期工单，再临时阻止轨迹写入：
+
+```powershell
+docker compose exec -T mysql mysql -uroot -proot_dev_only iot_ops -e "DROP TRIGGER IF EXISTS demo_reject_timeout_track; CREATE TRIGGER demo_reject_timeout_track BEFORE INSERT ON work_order_track FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='demo timeout track failure';"
+```
+
+在“可靠性中心”手动执行巡检后，执行记录应为部分失败，失败页出现工单、原因和次数，该工单仍未标记超时。随即删除演示 trigger：
+
+```powershell
+docker compose exec -T mysql mysql -uroot -proot_dev_only iot_ops -e "DROP TRIGGER IF EXISTS demo_reject_timeout_track;"
+```
+
+刷新失败记录并点击“人工补偿”。预期失败状态变为“已解决”，工单出现超时标记和补偿轨迹；OpenAPI 返回应与页面一致。演示结束必须确认 trigger 已删除。
+
 ## RocketMQ 消息契约
 
 Topic：`iot-device-alarm`，JSON 示例：

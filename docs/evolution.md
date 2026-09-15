@@ -114,4 +114,10 @@ The design reduces repeated role joins and gives revocation an explicit behavior
 
 v1.0.0 adds group/tag management, permission-aware administration, business audit queries, real dashboard counts, Prometheus counters, one-command Compose, Java/Node/container CI and complete public documentation. A full Compose run exposed two packaging defects that compilation could not reveal: a root-owned RocketMQ volume and a non-writable executor log directory. The final Compose initializes the Broker volume with UID 3000 and puts executor logs in a writable temporary path; health checks and actual RocketMQ/XXL runs verify the fixes.
 
+## v1.1.0 — measurable writes and presentation clarity
+
+The existing import benchmark measured only lookup round trips, so it could not support any statement about XML INSERT latency or commit cost. v1.1.0 adds a separate MySQL 8.4.11 benchmark that constructs each 500-row batch before timing, observes the Mapper call and the enclosing committed transaction independently, and probes the actual MyBatis BoundSql to assert one statement with 500 values groups. Raw samples and boundaries are published in `docs/testing.md`; the earlier four-query `6 ms` result remains a lookup-only measurement.
+
+The administration UI is localized through display maps rather than changing backend enums, permission codes or API contracts. Work-order details now expose deadline, timeout marker and SYSTEM tracks, making the same timeout result observable from the business UI, the XXL-JOB scheduler and OpenAPI without creating parallel business paths. Direct-route browser verification exposed a startup race in which permission-gated pages mounted before `/auth/me` completed; protected pages now mount only after session restoration, and the browser audit verifies both the SYSTEM track and localized resolved-failure view.
+
 The frontend currently reports an Element Plus bundle-size warning. Route components already load lazily, but the shared UI library remains large. No invented performance benefit is claimed: component-level import optimization is deferred until browser timing or bundle budgets provide a pass/fail target.

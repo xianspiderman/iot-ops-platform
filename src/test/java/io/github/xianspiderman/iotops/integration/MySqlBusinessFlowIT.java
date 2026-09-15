@@ -10,6 +10,7 @@ import io.github.xianspiderman.iotops.auth.RbacService;
 import io.github.xianspiderman.iotops.common.BusinessException;
 import io.github.xianspiderman.iotops.common.PageResult;
 import io.github.xianspiderman.iotops.device.Device;
+import io.github.xianspiderman.iotops.device.DeviceMapper;
 import io.github.xianspiderman.iotops.device.DeviceService;
 import io.github.xianspiderman.iotops.device.importer.DeviceImportError;
 import io.github.xianspiderman.iotops.device.importer.DeviceImportRow;
@@ -33,6 +34,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.MySQLContainer;
@@ -44,7 +49,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -106,6 +113,12 @@ class MySqlBusinessFlowIT {
     private DataScopeService dataScopeService;
     @Autowired
     private DeviceService deviceService;
+    @Autowired
+    private DeviceMapper deviceMapper;
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+    @Autowired
+    private BatchInsertStatementProbe batchInsertProbe;
 
     @BeforeEach
     void cleanBusinessRows() {
@@ -530,6 +543,135 @@ class MySqlBusinessFlowIT {
                 rowCount, rowCount * 3, naiveMillis, 4, batchMillis);
         assertThat(batchExisting).isEqualTo(naiveExisting);
         assertThat(batchMillis).isLessThan(naiveMillis);
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "iot.benchmark", matches = "true")
+    void benchmarkFiveHundredDeviceXmlMultiValueInsert() {
+        int rowsPerRound = 500;
+        int warmupRounds = 2;
+        int measuredRounds = 10;
+        String runPrefix = "BINS-" + Long.toUnsignedString(System.nanoTime(), 36).toUpperCase(Locale.ROOT) + "-";
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM project WHERE id = 1", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM product WHERE id = 1", Integer.class)).isEqualTo(1);
+
+        List<InsertBenchmarkSample> samples = new ArrayList<>();
+        try {
+            for (int round = 1; round <= warmupRounds + measuredRounds; round++) {
+                boolean warmup = round <= warmupRounds;
+                int phaseRound = warmup ? round : round - warmupRounds;
+                String roundPrefix = runPrefix + (warmup ? "W" : "M") + "%02d-".formatted(phaseRound);
+                List<Device> devices = benchmarkDevices(roundPrefix, rowsPerRound);
+
+                InsertBenchmarkSample sample = committedBatchInsert(devices);
+                int inserted = jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM device WHERE sn LIKE ?", Integer.class, roundPrefix + "%");
+                assertThat(inserted).isEqualTo(rowsPerRound);
+                assertThat(sample.affectedRows()).isEqualTo(rowsPerRound);
+                assertThat(sample.mapperCalls()).isEqualTo(1);
+                assertThat(sample.sqlStatements()).isEqualTo(1);
+                assertThat(sample.valueTuples()).isEqualTo(rowsPerRound);
+                assertThat(sample.sql()).startsWith("INSERT INTO device").contains("VALUES");
+                assertThat(sample.transactionTotalNanos()).isGreaterThanOrEqualTo(sample.insertCallNanos());
+
+                System.out.printf(Locale.ROOT,
+                        "DEVICE_BATCH_INSERT_ROUND phase=%s round=%d rows=%d mapperCalls=%d "
+                                + "sqlStatements=%d valueTuples=%d insertCallMs=%.3f transactionTotalMs=%.3f%n",
+                        warmup ? "warmup" : "measured", phaseRound, rowsPerRound,
+                        sample.mapperCalls(), sample.sqlStatements(), sample.valueTuples(),
+                        nanosToMillis(sample.insertCallNanos()), nanosToMillis(sample.transactionTotalNanos()));
+                if (!warmup) {
+                    samples.add(sample);
+                }
+            }
+
+            assertThat(samples).hasSize(measuredRounds);
+            printInsertSummary("insertCallMs", samples.stream().map(InsertBenchmarkSample::insertCallNanos).toList());
+            printInsertSummary("transactionTotalMs",
+                    samples.stream().map(InsertBenchmarkSample::transactionTotalNanos).toList());
+            verifyUniqueConstraintRollsBackTheWholeWrite(runPrefix + "TX-");
+        } finally {
+            jdbc.update("DELETE FROM device WHERE sn LIKE ?", runPrefix + "%");
+        }
+
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM device WHERE sn LIKE ?", Integer.class, runPrefix + "%")).isZero();
+    }
+
+    private InsertBenchmarkSample committedBatchInsert(List<Device> devices) {
+        batchInsertProbe.reset();
+        DefaultTransactionDefinition definition = new DefaultTransactionDefinition();
+        definition.setName("device-batch-insert-benchmark");
+        definition.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        long transactionStart = System.nanoTime();
+        TransactionStatus transaction = transactionManager.getTransaction(definition);
+        int affectedRows;
+        long insertCallNanos;
+        try {
+            long insertStart = System.nanoTime();
+            affectedRows = deviceMapper.batchInsert(devices);
+            insertCallNanos = System.nanoTime() - insertStart;
+            transactionManager.commit(transaction);
+        } catch (RuntimeException exception) {
+            if (!transaction.isCompleted()) {
+                transactionManager.rollback(transaction);
+            }
+            throw exception;
+        }
+        long transactionTotalNanos = System.nanoTime() - transactionStart;
+        BatchInsertStatementProbe.Snapshot probe = batchInsertProbe.snapshot();
+        return new InsertBenchmarkSample(insertCallNanos, transactionTotalNanos, affectedRows,
+                probe.mapperCalls(), probe.sqlStatements(), probe.valueTuples(), probe.sql());
+    }
+
+    private void verifyUniqueConstraintRollsBackTheWholeWrite(String prefix) {
+        DefaultTransactionDefinition definition = new DefaultTransactionDefinition();
+        definition.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        TransactionStatus transaction = transactionManager.getTransaction(definition);
+        boolean duplicateRejected = false;
+        try {
+            deviceMapper.batchInsert(List.of(device(prefix + "FIRST")));
+            deviceMapper.batchInsert(List.of(device(prefix + "DUP"), device(prefix + "DUP")));
+            transactionManager.commit(transaction);
+        } catch (RuntimeException expected) {
+            duplicateRejected = true;
+            if (!transaction.isCompleted()) {
+                transactionManager.rollback(transaction);
+            }
+        }
+        assertThat(duplicateRejected).isTrue();
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM device WHERE sn LIKE ?", Integer.class, prefix + "%")).isZero();
+    }
+
+    private List<Device> benchmarkDevices(String prefix, int count) {
+        return java.util.stream.IntStream.range(0, count)
+                .mapToObj(index -> device(prefix + "%03d".formatted(index)))
+                .toList();
+    }
+
+    private void printInsertSummary(String metric, List<Long> rawNanos) {
+        List<Long> sorted = rawNanos.stream().sorted(Comparator.naturalOrder()).toList();
+        double minimum = nanosToMillis(sorted.getFirst());
+        double median = sorted.size() % 2 == 0
+                ? (nanosToMillis(sorted.get(sorted.size() / 2 - 1)) + nanosToMillis(sorted.get(sorted.size() / 2))) / 2
+                : nanosToMillis(sorted.get(sorted.size() / 2));
+        double average = rawNanos.stream().mapToDouble(this::nanosToMillis).average().orElseThrow();
+        int p95Index = Math.max(0, (int) Math.ceil(sorted.size() * 0.95) - 1);
+        double p95 = nanosToMillis(sorted.get(p95Index));
+        System.out.printf(Locale.ROOT,
+                "DEVICE_BATCH_INSERT_SUMMARY metric=%s rounds=%d min=%.3f median=%.3f average=%.3f p95=%.3f%n",
+                metric, rawNanos.size(), minimum, median, average, p95);
+    }
+
+    private double nanosToMillis(long nanos) {
+        return nanos / 1_000_000.0;
+    }
+
+    private record InsertBenchmarkSample(long insertCallNanos, long transactionTotalNanos, int affectedRows,
+                                         int mapperCalls, int sqlStatements, int valueTuples, String sql) {
     }
 
     private Callable<Boolean> acceptAttempt(Long orderId, Long userId, CountDownLatch ready, CountDownLatch go) {

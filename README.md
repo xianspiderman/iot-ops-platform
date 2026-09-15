@@ -2,7 +2,7 @@
 
 IoT Ops Platform 是一套面向设备交付与现场运维的管理平台。它把项目、产品、设备台账、分组标签、批量导入、告警、工单、超时巡检、权限和失败恢复放在同一条可审计业务链路中，让运维人员能够回答：哪台设备出了什么问题、谁在何时处理、失败后如何恢复，以及重复或并发请求最终留下了什么结果。
 
-当前版本：**v1.0.0**
+当前版本：**v1.1.0**
 
 ![登录页](docs/screenshots/login.png)
 
@@ -78,7 +78,7 @@ Linux / macOS：
 docker compose ps
 ```
 
-启动脚本先用 Maven Wrapper 构建 Java 产物，再构建并启动整套容器。第一次运行需要拉取镜像。MySQL 会创建 `iot_ops` 和 `xxl_job` 数据库，Flyway 自动执行 V1—V4，XXL-JOB 自动注册五分钟巡检任务。
+启动脚本先用 Maven Wrapper 构建 Java 产物，再构建并启动整套容器。第一次运行需要拉取镜像。MySQL 会创建 `iot_ops` 和 `xxl_job` 数据库，Flyway 自动执行 V1—V5，XXL-JOB 自动注册五分钟巡检任务。
 
 | 入口 | 地址 / 账号 |
 |---|---|
@@ -94,11 +94,13 @@ docker compose ps
 
 ## 推荐演示流程
 
+管理端是业务操作入口；OpenAPI 展示和调试同一套后端接口；XXL-JOB 是定时任务调度控制端，负责触发后端注册的任务入口。三者最终复用同一个 Spring Boot 业务 Service 并读写同一个 MySQL，不存在三套独立业务逻辑。
+
 1. 用 `admin` 登录，查看总览、项目/产品、设备分组和标签。
 2. 在设备页创建台账；尝试重复 SN，观察应用错误和数据库约束的双层保护。
 3. 在设备导入页上传 `.xlsx`。表头依次为 `SN`、`Device Name`、`Project Code`、`Product Code`、`IMEI`、`MAC`、`Firmware Version`；查看任务计数并下载错误 CSV。
 4. 创建关联多台设备的工单，按 `WAITING -> PROCESSING -> WAIT_VERIFY -> CLOSED` 完成；查看每一步轨迹。
-5. 在可靠性页面手动执行巡检，查看执行记录和失败补偿；XXL-JOB 也会周期触发同一处理入口。
+5. 演示三入口串联：在工单页查看一张已经到期但尚未标记超时的工单；进入 XXL-JOB 手动执行 `workOrderTimeoutInspection`；回到可靠性中心查看触发来源、扫描和成功数，再到工单“详情与轨迹”确认超时标记、超时时间与 SYSTEM 轨迹；最后用 OpenAPI 的 `/work-orders/{id}` 和 `/timeout-inspections/executions` 独立核对同一后端结果。快速准备到期工单、故障注入和人工补偿步骤见 [API 与串联演示](docs/api.md)。
 6. 发布一个真实 RocketMQ 消息：
 
    ```powershell
@@ -128,6 +130,8 @@ docker compose ps
 
 Linux / macOS 对应 `./scripts/stop.sh` 与 `./scripts/clean.sh`。
 
+Windows 上可在完成三入口与失败恢复演示数据后运行 `.\scripts\verify-ui-localization.ps1`，用隐藏 Edge 依次加载全部业务页面，并核对中文标题、SYSTEM 超时轨迹及已解决失败记录的中文展示。
+
 ## 本地开发
 
 只启动基础依赖，后端和前端在宿主机运行：
@@ -156,7 +160,7 @@ npm ci
 npm run build
 ```
 
-最终本地验收包含 9 个单元测试和 16 个常规集成测试；集成测试使用 MySQL 8.4.11 与 Redis 8.2.1 Testcontainers，而不是用内存数据库替代唯一约束、事务和并发行为。覆盖敏感字段序列化、并发接单、轨迹回滚、一对多分页、导入混合错误与中间批次异常、重复巡检、单条回滚与恢复、首次/重复/并发消费、坏消息、系统重试、缓存命中/失效/会话变化和数据范围。
+最终本地验收包含 9 个单元测试和 16 个常规集成测试，另有 2 个显式开启的独立性能基准；集成测试使用 MySQL 8.4.11 与 Redis 8.2.1 Testcontainers，而不是用内存数据库替代唯一约束、事务和并发行为。覆盖敏感字段序列化、并发接单、轨迹回滚、一对多分页、导入混合错误与中间批次异常、重复巡检、单条回滚与恢复、首次/重复/并发消费、坏消息、系统重试、缓存命中/失效/会话变化和数据范围。
 
 可选基准测试在 1,000 行上比较导入分类阶段的逐行查询候选与批量查询实现：
 
@@ -164,7 +168,9 @@ npm run build
 .\mvnw.cmd -B "-Diot.benchmark=true" "-Dit.test=MySqlBusinessFlowIT#benchmarkImportLookupRoundTripsAgainstRowByRowCandidate" verify
 ```
 
-2026-09-15 的一次受控本机运行中，逐行候选执行 3,000 次查询用时 1,924 ms，批量实现执行 4 次查询用时 6 ms。该数字只证明同一 Testcontainer、同一进程内的查重/主数据查询阶段，不等同于完整 Excel 导入吞吐。机器、方法和边界见 [测试报告](docs/testing.md)。
+2026-09-15 的受控本机运行中，逐行候选执行 3,000 次查询用时 1,924 ms，批量实现执行 4 次查询用时 6 ms。该数字只证明同一 Testcontainer、同一进程内的查重/主数据查询阶段，不等同于完整 Excel 导入吞吐。
+
+独立的 500 条真实提交基准执行一次 XML 多值 INSERT：10 轮中应用侧观测的 Mapper 调用耗时中位数为 44.716 ms，包含 commit 的事务总耗时中位数为 54.609 ms；两者均不含解析、查询和业务校验，也不与上面的 6 ms 合并，完整样本与边界见 [测试报告](docs/testing.md)。
 
 ## 关键难点与演进
 
@@ -185,6 +191,7 @@ npm run build
 - [v0.2.0](docs/releases/v0.2.0.md)：完整状态机、批量导入、原子更新和 MySQL 行为测试
 - [v0.3.0](docs/releases/v0.3.0.md)：XXL-JOB 巡检、RocketMQ 告警、失败记录和人工恢复
 - [v1.0.0](docs/releases/v1.0.0.md)：完整 RBAC、Redis 缓存、管理端、观测、Compose、CI 和公开文档
+- [v1.1.0](docs/releases/v1.1.0.md)：中文管理端、工单超时轨迹展示、三入口演示和 500 条 XML INSERT 专项基准
 
 每一版都在对应代码和测试通过后形成独立 Git 提交并打 Tag。详细提交证据可直接查看仓库历史。
 
